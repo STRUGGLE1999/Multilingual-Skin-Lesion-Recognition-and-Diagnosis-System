@@ -53,3 +53,7 @@ Measles：麻疹，由麻疹病毒引起的高度传染性疾病，常见症状�
 Cowpox：牛痘，一种由牛痘病毒感染引起的皮肤病，历史上用于制造天花疫苗。
 
 Healthy：健康个体，不含任何皮肤病变，用于对照研究。
+
+### Gradio应用链接
+
+https://xihe.mindspore.cn/projects/STRUGGLE/SkinLesionApp/
