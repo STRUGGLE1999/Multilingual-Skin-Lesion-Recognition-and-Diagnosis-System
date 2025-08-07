@@ -57,3 +57,5 @@ Healthy：健康个体，不含任何皮肤病变，用于对照研究。
 ### Gradio应用链接
 
 https://xihe.mindspore.cn/projects/STRUGGLE/SkinLesionApp/
+
+### 图片展示
