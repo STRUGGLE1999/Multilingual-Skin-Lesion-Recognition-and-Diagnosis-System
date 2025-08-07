@@ -2,25 +2,74 @@ import gradio as gr
 from PIL import Image
 import numpy as np
 import mindspore as ms
-from mindspore import Tensor, context
-import mindspore.nn as nn
-from mindspore.train.serialization import load
+from mindspore import Tensor, context, load_checkpoint, load_param_into_net
+from mindcv.models import create_model  # 从 MindCV 导入模型构建方法
 from openai import OpenAI
-import requests
 import base64
 import io
+import os
 
-
-client = OpenAI(
-    base_url="https://ai.gitee.com/v1",
-    api_key="HHKM7PMBA4SKWMRZFQMLGZL73IMSUH8PVKF3FT1M",  # 你已提供
-)
-
-# 设置MindSpore上下文
+# 设置 MindSpore 运行模式
 context.set_context(mode=context.GRAPH_MODE, device_target="CPU")
 
+# 初始化 Lingshu-32B Client
+client = OpenAI(
+    base_url="https://ai.gitee.com/v1",
+    api_key="HHKM7PMBA4SKWMRZFQMLGZL73IMSUH8PVKF3FT1M",
+)
+
+# 标签映射（根据你的文件夹名称按字典序排序）
+labels = {
+    0: 'CHP',      # Chickenpox
+    1: 'CWP',      # Cowpox
+    2: 'HEALTHY',
+    3: 'HFMD',
+    4: 'MKP',      # MPOX
+    5: 'MSL'       # Measles
+}
+label_name_map = {
+    "CHP": "Chickenpox",
+    "CWP": "Cowpox",
+    "HEALTHY": "Healthy",
+    "HFMD": "Hand,foot and mouth disease",
+    "MKP": "MPOX",
+    "MSL": "Measles"
+}
+
+# 加载 MindCV 的 ResNet50 模型
+net = create_model(model_name='densenet121', num_classes=6, pretrained=False)
+param_dict = load_checkpoint("densenet121_best.ckpt")
+load_param_into_net(net, param_dict)
+net.set_train(False)
+
+# 图像预处理函数
+def preprocess_image(image):
+    image = image.resize((224, 224))
+    image_array = np.array(image).astype(np.float32)
+    if image_array.ndim == 2:
+        image_array = np.stack([image_array] * 3, axis=-1)
+    image_array = image_array.transpose(2, 0, 1) / 255.0
+    image_array = np.expand_dims(image_array, axis=0)
+    return Tensor(image_array, ms.float32)
+
+# 推理函数
+def predict(image):
+    input_tensor = preprocess_image(image)
+    output = net(input_tensor)
+
+    # 添加 softmax 将 logit 转换为概率
+    softmax = ms.nn.Softmax()
+    probs = softmax(output)
+
+    prediction = probs.asnumpy()[0]
+    top_index = np.argmax(prediction)
+    confidence = prediction[top_index] * 100
+    label_code = labels[top_index]
+    return label_name_map[label_code], confidence
+
+
+# 调用 Lingshu-32B 生成诊断报告
 def generate_report(label, language="zh", image=None):
-    # 构造提示词
     lang_map = {
         "zh": "请用中文生成关于该皮肤病的诊断建议",
         "en": "Please write a medical explanation in English for the condition",
@@ -29,7 +78,6 @@ def generate_report(label, language="zh", image=None):
 
     prompt = f"病种：{label}。\n患者上传了一张皮肤病照片。请基于图像和病种，为医生提供初步诊断建议，包括症状描述、可能病因、是否需要就医、注意事项。\n{lang_map.get(language)}"
 
-    # 如果传入了图像（PIL对象），我们需要将其 base64 编码
     image_url = None
     if image:
         buffered = io.BytesIO()
@@ -37,7 +85,6 @@ def generate_report(label, language="zh", image=None):
         img_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
         image_url = f"data:image/jpeg;base64,{img_base64}"
 
-    # 构建消息体
     messages = [
         {
             "role": "system",
@@ -60,7 +107,6 @@ def generate_report(label, language="zh", image=None):
         }
     ]
 
-    # 执行 Lingshu-32B 推理
     response = client.chat.completions.create(
         messages=messages,
         model="Lingshu-32B",
@@ -72,90 +118,87 @@ def generate_report(label, language="zh", image=None):
         frequency_penalty=0,
     )
 
-    # 提取结果
     return response.choices[0].message.content.strip()
 
-# 定义模型结构（和你之前的一样）
-class LeNet(nn.Cell):
-    def __init__(self):
-        super(LeNet, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)
-        self.relu = nn.ReLU()
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        
-        # 自动计算 flatten 后的大小
-        dummy_input = Tensor(np.zeros((1, 3, 224, 224)), ms.float32)
-        x = self.pool(self.relu(self.conv1(dummy_input)))
-        x = self.pool(self.relu(self.conv2(x)))
-        self.flatten_size = x.shape[1] * x.shape[2] * x.shape[3]
-
-        self.fc1 = nn.Dense(self.flatten_size, 120)
-        self.fc2 = nn.Dense(120, 84)
-        self.fc3 = nn.Dense(84, 6)
-
-    def construct(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(x.shape[0], -1)
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
-
-# 加载 mindir 模型
-net = LeNet()
-load("best.mindir", net=net)
-
-labels = {
-    0: 'Chickenpox',
-    1: 'Cowpox',
-    2: 'HFMD',
-    3: 'Healthy',
-    4: 'Measles',
-    5: 'MPOX'
-}
-
-def preprocess_image(image):
-    image = image.resize((224, 224))
-    image_array = np.array(image).astype(np.float32)
-    if image_array.ndim == 2:
-        image_array = np.stack([image_array] * 3, axis=-1)
-    image_array = image_array.transpose(2, 0, 1) / 255.0
-    image_array = np.expand_dims(image_array, axis=0)
-    return Tensor(image_array, ms.float32)
-
-def predict(image):
-    input_tensor = preprocess_image(image)
-    output = net(input_tensor)
-    prediction = output.asnumpy()[0]
-    top_indices = prediction.argsort()[-3:][::-1]
-    top_classes = [f"{labels[i]} ({prediction[i]*100:.2f}%)" for i in top_indices]
-    return labels[top_indices[0]], "\n".join(top_classes)  # 返回Top-1标签 和 Top-3字符串
-
-# Gradio界面函数
+# Gradio 界面交互函数
 def gradio_interface(image, language):
     if image is None:
         return "请上传图片", ""
-    top1_label, top3_text = predict(image)
-    report = generate_report(top1_label, language=language, image=image)
-    return top3_text, report
+    label, confidence = predict(image)
+    result_text = f"模型识别为：**{label}**\n置信度：{confidence:.2f}%"
+    report = generate_report(label, language=language, image=image)
+    return result_text, report
 
-# 构建Gradio界面
-iface = gr.Interface(
-    fn=gradio_interface,
-    inputs=[
-        gr.Image(type="pil", label="上传或拍摄皮肤图像"),
-        gr.Radio(choices=["zh", "en", "ar"], label="输出语言", value="zh")
-    ],
-    outputs=[
-        gr.Textbox(label="分类结果"),
-        gr.Textbox(label="自动生成诊断报告")
-    ],
-    title="皮肤病分类 + 多语种诊断系统",
-    description="上传皮肤图像，识别病种，并自动生成中文、英文或阿拉伯语诊断建议（Lingshu-32B 大模型）"
-)
+# 示例图片及对应标签，请替换为你的真实路径和标签
+example_images = [
+    ["../examples/CHP_07_01.jpg", "Chickenpox"],
+    ["../examples/CWP_03_01.jpg", "Cowpox"],
+    ["../examples/HEALTHY_105_01.jpg", "Healthy"],
+    ["../examples/HFMD_03_01.jpg", "Hand,foot and mouth disease"],
+    ["../examples/MKP_06_01.jpg", "Mpox"],
+    ["../examples/MSL_11_01.jpg", "Measles"]
+]
+
+# 加载 PIL 图像列表
+example_imgs_pil = []
+for path, label in example_images:
+    if os.path.exists(path):
+        example_imgs_pil.append(Image.open(path))
+    else:
+        example_imgs_pil.append(Image.new("RGB", (224, 224), (200, 200, 200)))
+
+# 构建 Gradio 界面
+with gr.Blocks() as demo:
+    gr.Markdown("<h1 style='text-align: center;'>🧪 多语言皮肤病分类与诊断系统（DenseNet121）</h1>")
+    gr.Markdown("<p style='text-align: center;'>上传图像，自动识别皮肤病，并生成多语种诊断建议</p>")
+
+    with gr.Row():
+        with gr.Column():
+            image_input = gr.Image(type="pil", label="📤 上传或拍摄皮肤图像")
+            language_input = gr.Radio(
+                choices=["zh", "en", "ar"],
+                label="🌍 选择诊断语言",
+                value="zh"
+            )
+            submit_button = gr.Button("🔍 开始诊断")
+        with gr.Column():
+            top_output = gr.Textbox(label="🔬 输出识别结果", lines=3)
+            report_output = gr.Textbox(label="📝 自动生成诊断报告", lines=8)
+    
+    submit_button.click(fn=gradio_interface,
+                        inputs=[image_input, language_input],
+                        outputs=[top_output, report_output])
+
+    # 示例图像静态展示（2行3列，每张图带标签）
+    gr.Markdown("### 🎯 示例图像快速测试（仅展示）")
+    
+    gallery = gr.Gallery(label="示例图像", show_label=False, value=example_imgs_pil, columns=3, height="auto")
+
+    # 点击示例图像 -> 显示到 image_input 框
+    def on_gallery_select(evt: gr.SelectData):
+        return example_imgs_pil[evt.index]
+
+    gallery.select(fn=on_gallery_select, inputs=[], outputs=[image_input])
+
+    # with gr.Row():
+    #     for i in range(2):  # 第一行 3 张图
+    #         with gr.Column():
+    #             img = gr.Image(value=example_images[i][0], show_label=False, interactive=True,height=150)
+    #             img.click(fn=lambda idx=i: update_image_input(idx), inputs=[], outputs=[image_input])
+    #             gr.Markdown(f"<center>**{example_images[i][1]}**</center>")
+
+    # with gr.Row():
+    #     for i in range(2, 4):  # 第二行 3 张图
+    #         with gr.Column():
+    #             img = gr.Image(value=example_images[i][0], show_label=False, interactive=True,height=150)
+    #             img.click(fn=lambda idx=i: update_image_input(idx), inputs=[], outputs=[image_input])
+    #             gr.Markdown(f"<center>**{example_images[i][1]}**</center>")
+    # with gr.Row():
+    #     for i in range(4, 6):  # 第二行 3 张图
+    #         with gr.Column():
+    #             img = gr.Image(value=example_images[i][0], show_label=False, interactive=True,height=150)
+    #             img.click(fn=lambda idx=i: update_image_input(idx), inputs=[], outputs=[image_input])
+    #             gr.Markdown(f"<center>**{example_images[i][1]}**</center>")
 
 if __name__ == "__main__":
-    iface.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(server_name="0.0.0.0", server_port=7860)
