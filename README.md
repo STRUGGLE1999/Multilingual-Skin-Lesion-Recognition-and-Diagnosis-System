@@ -59,3 +59,6 @@ Healthy：健康个体，不含任何皮肤病变，用于对照研究。
 https://xihe.mindspore.cn/projects/STRUGGLE/SkinLesionApp/
 
 ### 图片展示
+![](https://github.com/STRUGGLE1999/Multilingual-Skin-Lesion-Recognition-and-Diagnosis-System/blob/main/1.png)
+
+![](https://github.com/STRUGGLE1999/Multilingual-Skin-Lesion-Recognition-and-Diagnosis-System/blob/main/2.png)
